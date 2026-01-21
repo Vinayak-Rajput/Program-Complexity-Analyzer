@@ -41,7 +41,10 @@ public class InputGenerator {
     // --- Data Generators ---
     private static int[] generateIntArray(int n) {
         int[] arr = new int[n];
-        for (int i = 0; i < n; i++) arr[i] = rand.nextInt(10000);
+        for (int i = 0; i < n; i++) arr[i] = rand.nextInt(100000);
+        // CRITICAL: Sort the array so Binary Search works!
+        // This doesn't hurt Linear Search (it just searches a sorted array).
+        java.util.Arrays.sort(arr);
         return arr;
     }
 
