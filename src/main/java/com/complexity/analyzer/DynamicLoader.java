@@ -4,35 +4,85 @@ import java.io.File;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+
 public class DynamicLoader {
-    private final Object instance;
-    private final Method method;
+    private Object instance;
+    private Class<?> clazz;
 
-    public DynamicLoader(File classFile, String methodName) throws Exception{
-        /*  Convert the classFile to URL - Local or remote Java wants the location of class which
-            cant be just a single path that's why url[] array instead or sinf=gle url {url} include
-            that url to container array url[]
-            classFile File object can invoke getParentFile() to give Parent Class then it is converted
-            to URI using toURI() and through toURL() we actually get the URL of the classFile
-         */
-        URL url = classFile.getParentFile().toURI().toURL();
-        URL[] urls=new URL[]{url};
+    public DynamicLoader(File classFile) throws Exception {
+        // Strategy: Try loading from the immediate folder.
+        // If it fails with "wrong name", move one folder up and try "Folder.Class".
+        // Repeat until loaded or we hit the root.
 
-        // Create a class Loader Basically URLClassLoader's newInstance(Object/Container) creates a Class Object which is
-        // loaded through the ClassLoader object
-        ClassLoader cl= URLClassLoader.newInstance(urls);
+        String definedClassName = null;
+        ClassLoader cl = null;
 
-        //Load exact class with matching name
-        String className = classFile.getName().replace(".class","");
-        Class<?> clazz = cl.loadClass(className);
+        // 1. Initial Attempt: Assume default package
+        try {
+            definedClassName = classFile.getName().replace(".class", "");
+            cl = getLoaderForPath(classFile.getParentFile());
+            this.clazz = cl.loadClass(definedClassName);
+        } catch (NoClassDefFoundError | ClassNotFoundException e) {
+            // 2. Package Detection Strategy
+            // The error message usually contains the correct name like "wrong name: com/sorting/MySort"
+            // We can parse this, OR we can brute-force walk up the directory.
 
-        //Create Instance
-        this.instance = clazz.getDeclaredConstructor().newInstance();
+            boolean loaded = false;
+            File currentRoot = classFile.getParentFile();
+            String currentPackage = "";
 
-        //Find Method hardcoded for int[] for now
-        this.method=clazz.getMethod(methodName,int[].class);
+            // Try walking up 5 levels max
+            for(int i=0; i<5; i++) {
+                if(currentRoot.getParentFile() == null) break;
+
+                // Move up one level
+                currentPackage = currentRoot.getName() + "." + currentPackage;
+                currentRoot = currentRoot.getParentFile();
+
+                try {
+                    String fullClassName = currentPackage + definedClassName;
+                    cl = getLoaderForPath(currentRoot);
+                    this.clazz = cl.loadClass(fullClassName);
+                    loaded = true;
+                    break; // Success!
+                } catch (Throwable ignored) {
+                    // Continue searching up
+                }
+            }
+
+            if (!loaded) throw new Exception("Could not determine package structure. Please load the class from its root project folder.");
+        }
+
+        // Create Instance (Handle missing no-args constructor)
+        try {
+            this.instance = clazz.getDeclaredConstructor().newInstance();
+        } catch (NoSuchMethodException e) {
+            // If no empty constructor, try to find ANY constructor and pass nulls/zeros
+            // (Advanced feature, usually not needed for simple algos)
+            throw new Exception("Class must have an empty constructor (public MyClass() {}).");
+        }
     }
-    public void run(int[] input)throws Exception{
-        method.invoke(instance, (Object) input);
+
+    private ClassLoader getLoaderForPath(File path) throws Exception {
+        return URLClassLoader.newInstance(new URL[]{path.toURI().toURL()});
+    }
+
+    public List<Method> getMethods() {
+        List<Method> validMethods = new ArrayList<>();
+        // Get all methods, including private ones
+        for (Method m : clazz.getDeclaredMethods()) {
+            // Filter out Object methods (toString, wait, etc.) and compiler artifacts
+            if (m.getDeclaringClass() != Object.class && !m.isSynthetic() && !m.getName().contains("$")) {
+                validMethods.add(m);
+            }
+        }
+        return validMethods;
+    }
+
+    public void run(Method method, Object[] args) throws Exception {
+        method.setAccessible(true);
+        method.invoke(instance, args);
     }
 }

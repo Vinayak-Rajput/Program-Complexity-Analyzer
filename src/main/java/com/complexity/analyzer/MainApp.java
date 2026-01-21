@@ -1,7 +1,7 @@
 package com.complexity.analyzer;
 
 import javafx.application.Application;
-import javafx.geometry.Insets;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.chart.LineChart;
 import javafx.scene.chart.NumberAxis;
@@ -9,125 +9,136 @@ import javafx.scene.chart.XYChart;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
-import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import java.io.File;
-import java.util.Random;
+import java.lang.reflect.Method;
 
 public class MainApp extends Application {
 
-    private File selectedFile;
+    private DynamicLoader currentLoader;
+    private final ComboBox<Method> methodDropdown = new ComboBox<>();
+
+    // ... Charts (same as before) ...
     private final XYChart.Series<Number, Number> timeSeries = new XYChart.Series<>();
-    private final XYChart.Series<Number, Number> spaceSeries = new XYChart.Series<>();
 
     @Override
     public void start(Stage stage) {
-        // --- 1. Top Controls ---
-        Button btnLoad = new Button("Select .class File");
-        TextField txtMethod = new TextField();
-        txtMethod.setPromptText("Method Name (e.g. bubbleSort)");
-        Button btnRun = new Button("Analyze");
+        // UI Components
+        Button btnLoad = new Button("1. Load Class");
+        Button btnRun = new Button("2. Analyze");
         Label lblStatus = new Label("Ready");
 
-        HBox controls = new HBox(10, btnLoad, txtMethod, btnRun);
-        controls.setPadding(new Insets(10));
-        controls.setStyle("-fx-background-color: #f4f4f4; -fx-border-color: #ddd; -fx-border-width: 0 0 1 0;");
+        // Customize Dropdown to show readable names
+        methodDropdown.setPromptText("Select Method");
+        methodDropdown.setButtonCell(new MethodListCell());
+        methodDropdown.setCellFactory(p -> new MethodListCell());
+        methodDropdown.setPrefWidth(300);
 
-        // --- 2. Charts ---
-        // Time Chart
-        NumberAxis xAxisTime = new NumberAxis();
-        xAxisTime.setLabel("Input Size (N)");
-        NumberAxis yAxisTime = new NumberAxis();
-        yAxisTime.setLabel("Time (ns)");
-        LineChart<Number, Number> timeChart = new LineChart<>(xAxisTime, yAxisTime);
-        timeChart.setTitle("Time Complexity");
-        timeChart.getData().add(timeSeries);
-        timeSeries.setName("Time");
+        // Chart Setup (Same as before)
+        NumberAxis xAxis = new NumberAxis(); xAxis.setLabel("N");
+        NumberAxis yAxis = new NumberAxis(); yAxis.setLabel("Time (ns)");
+        LineChart<Number, Number> chart = new LineChart<>(xAxis, yAxis);
+        chart.getData().add(timeSeries);
+        timeSeries.setName("Time Complexity");
 
-        // Space Chart (Optional enhancement)
-        NumberAxis xAxisSpace = new NumberAxis();
-        xAxisSpace.setLabel("Input Size (N)");
-        NumberAxis yAxisSpace = new NumberAxis();
-        yAxisSpace.setLabel("Memory (Bytes)");
-        LineChart<Number, Number> spaceChart = new LineChart<>(xAxisSpace, yAxisSpace);
-        spaceChart.setTitle("Space Complexity");
-        spaceChart.getData().add(spaceSeries);
-        spaceSeries.setName("Space");
-
-        TabPane tabs = new TabPane();
-        tabs.getTabs().add(new Tab("Time Complexity", timeChart));
-        tabs.getTabs().add(new Tab("Space Complexity", spaceChart));
-        for(Tab t : tabs.getTabs()) t.setClosable(false);
-
-        // --- 3. Layout ---
-        BorderPane root = new BorderPane();
-        root.setTop(new VBox(controls, lblStatus));
-        root.setCenter(tabs);
-
-        // --- 4. Logic ---
+        // Logic
         btnLoad.setOnAction(e -> {
             FileChooser fc = new FileChooser();
             fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Java Class", "*.class"));
-            selectedFile = fc.showOpenDialog(stage);
-            if(selectedFile != null) lblStatus.setText("Loaded: " + selectedFile.getName());
+            File file = fc.showOpenDialog(stage);
+            if (file != null) {
+                try {
+                    currentLoader = new DynamicLoader(file);
+                    // Populate Dropdown
+                    methodDropdown.getItems().setAll(currentLoader.getMethods());
+                    lblStatus.setText("Loaded: " + file.getName());
+                } catch (Exception ex) {
+                    lblStatus.setText("Error: " + ex.getMessage());
+                }
+            }
         });
 
         btnRun.setOnAction(e -> {
-            if (selectedFile == null || txtMethod.getText().isEmpty()) {
-                lblStatus.setText("Error: Missing file or method name.");
+            Method selectedMethod = methodDropdown.getValue();
+            if (currentLoader == null || selectedMethod == null) {
+                lblStatus.setText("Select a class and method first!");
                 return;
             }
-            runAnalysis(txtMethod.getText(), lblStatus);
+            btnRun.setDisable(true);
+            runAnalysis(selectedMethod, lblStatus, btnRun);
         });
 
-        Scene scene = new Scene(root, 900, 600);
-        stage.setTitle("Algorithm Complexity Visualizer");
-        stage.setScene(scene);
+        HBox controls = new HBox(10, btnLoad, methodDropdown, btnRun);
+        BorderPane root = new BorderPane();
+        root.setTop(controls);
+        root.setCenter(chart);
+        root.setBottom(lblStatus);
+
+        stage.setScene(new Scene(root, 900, 600));
         stage.show();
     }
 
-    private void runAnalysis(String methodName, Label status) {
+    private void runAnalysis(Method method, Label status, Button btn) {
         timeSeries.getData().clear();
-        spaceSeries.getData().clear();
 
         new Thread(() -> {
             try {
-                DynamicLoader loader = new DynamicLoader(selectedFile, methodName);
+                // "Adaptive Range"
+                // Start small, go BIG (up to 100,000)
+                // But we will BREAK early if it gets too slow.
+                for (int n = 1000; n <= 100000; n += 2000) {
+                    try {
+                        Profiler.Metric m = Profiler.analyze(currentLoader, method, n);
 
-                // Analyze for N = 100 to 2000
-                for (int n = 0; n <= 50000; n += 2000) {
-                    int[] data = new int[n];
-                    Random r = new Random();
-                    for(int i=0; i<n; i++) data[i] = r.nextInt(10000);
+                        // Update Chart
+                        Platform.runLater(() -> timeSeries.getData().add(new XYChart.Data<>(m.inputSize(), m.timeNs())));
 
-                    // Clone data because sort algorithms modify the array in place
-                    int[] input = data.clone();
+                        // SAFETY BREAK:
+                        // If a single run takes longer than 100ms (0.1s), STOP increasing N.
+                        // This lets Fast Algos go to N=100k, but stops Bubble Sort at N=5k.
+                        if (m.timeNs() > 100_000_000) {
+                            Platform.runLater(() -> status.setText("Stopping early: Algorithm is getting slow."));
+                            break;
+                        }
 
-                    Profiler.Metric metric = Profiler.analyze(loader, input);
-
-                    if(n==0) continue;
-
-                    // Update UI on JavaFX Application Thread
-                    javafx.application.Platform.runLater(() -> {
-                        timeSeries.getData().add(new XYChart.Data<>(metric.inputSize(), metric.timeNs()));
-                        spaceSeries.getData().add(new XYChart.Data<>(metric.inputSize(), metric.memoryBytes()));
-                    });
-
-                    // Small delay to keep UI responsive
-                    Thread.sleep(10);
+                    } catch (Exception ex) {
+                        // ... Error handling ...
+                        break;
+                    }
                 }
-                javafx.application.Platform.runLater(() -> status.setText("Analysis Complete."));
-
+                Platform.runLater(() -> status.setText("Analysis Complete."));
             } catch (Exception e) {
                 e.printStackTrace();
-                javafx.application.Platform.runLater(() -> status.setText("Error: " + e.getCause()));
+            } finally {
+                Platform.runLater(() -> btn.setDisable(false));
             }
         }).start();
     }
 
-    public static void main(String[] args) {
-        launch();
+    // Helper to display method signatures nicely
+    private static class MethodListCell extends ListCell<Method> {
+        @Override
+        protected void updateItem(Method item, boolean empty) {
+            super.updateItem(item, empty);
+            if (empty || item == null) {
+                setText(null);
+            } else {
+                // Format: returnType name(param1, param2)
+                StringBuilder sb = new StringBuilder();
+                sb.append(item.getReturnType().getSimpleName()).append(" ");
+                sb.append(item.getName()).append("(");
+                var params = item.getParameterTypes();
+                for (int i = 0; i < params.length; i++) {
+                    sb.append(params[i].getSimpleName());
+                    if (i < params.length - 1) sb.append(", ");
+                }
+                sb.append(")");
+                setText(sb.toString());
+            }
+        }
     }
+
+    public static void main(String[] args) { launch(); }
 }
